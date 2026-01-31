@@ -329,7 +329,9 @@ class OllamaLLM:
                 ['ollama', 'list'],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
+                encoding='utf-8',
+                errors='ignore'
             )
             return result.returncode == 0
         except Exception:
@@ -341,8 +343,21 @@ class OllamaLLM:
             return self._fallback_response(prompt, context)
         
         try:
-            # Construct full prompt
-            full_prompt = f"""You are a financial analysis assistant. Use the following context to answer the question.
+            # Detect if user wants brief answer
+            brief_keywords = ['one line', 'brief', 'short', 'quick', 'simply', 'just tell', 'in short', 'summarize','summary']
+            is_brief = any(keyword in prompt.lower() for keyword in brief_keywords)
+            
+            # Construct full prompt based on request type
+            if is_brief:
+                full_prompt = f"""You are a financial assistant. Answer in ONE LINE ONLY. Be direct and concise.
+
+Context: {context[:500]}
+
+Question: {prompt}
+
+Answer (one line only):"""
+            else:
+                full_prompt = f"""You are a financial analysis assistant. Use the following context to answer the question.
 
 Context:
 {context}
@@ -358,20 +373,48 @@ Answer:"""
                 ['ollama', 'run', self.model_id, full_prompt],
                 capture_output=True,
                 text=True,
-                timeout=60
+                timeout=60,
+                encoding='utf-8',
+                errors='ignore'
             )
             
             if result.returncode == 0:
-                return result.stdout.strip()
+                response = result.stdout.strip()
+                # If brief requested, take only first line
+                if is_brief and '\n' in response:
+                    response = response.split('\n')[0]
+                return response
             else:
-                return self._fallback_response(prompt, context)
+                return self._fallback_response(prompt, context, is_brief)
         
         except Exception as e:
             st.warning(f"Ollama error: {e}. Using fallback.")
             return self._fallback_response(prompt, context)
     
-    def _fallback_response(self, prompt: str, context: str) -> str:
+    def _fallback_response(self, prompt: str, context: str, is_brief: bool = False) -> str:
         """Fallback response when Ollama is unavailable"""
+        
+        # Detect brief request
+        brief_keywords = ['one line', 'brief', 'short', 'quick', 'simply', 'just tell', 'in short', 'summarize']
+        if not is_brief:
+            is_brief = any(keyword in prompt.lower() for keyword in brief_keywords)
+        
+        if is_brief:
+            # Return one-line answer
+            if 'expense' in prompt.lower() or 'cost' in prompt.lower():
+                return "Review expenses, identify top spending categories, and cut 10-15% from discretionary items."
+            elif 'revenue' in prompt.lower() or 'income' in prompt.lower():
+                return "Focus on high-margin products, diversify revenue streams, and optimize pricing strategy."
+            elif 'profit' in prompt.lower():
+                return "Increase revenue by 15%, reduce costs by 10%, and improve operational efficiency."
+            elif 'budget' in prompt.lower():
+                return "Use 50/30/20 rule: 50% needs, 30% wants, 20% savings/debt repayment."
+            elif 'invest' in prompt.lower():
+                return "Diversify with index funds, maintain emergency fund, and invest consistently for long-term growth."
+            else:
+                return "Review your financial data, set clear goals, and create actionable plans with regular monitoring."
+        
+        # Full response for detailed queries
         response = f"""**Financial Analysis** (Rule-based response - Ollama unavailable)
 
 Based on the query: "{prompt}"
