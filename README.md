@@ -1,157 +1,43 @@
-<body>
+# **BUDDHI – Enterprise Reasoning Engine**
 
-  <h1>BUDDHI – Enterprise Reasoning Engine</h1>
+BUDDHI (derived from Sanskrit, meaning intellect, discernment, decision-making) is an on-premise enterprise AI system that understands, reasons, and advises using internal organizational data such as:
+1. Financial reports (PDF, Excel)
+2. Operational documents
+3. Policies & compliance data
+4. Structured and unstructured datasets
+5. Unlike generic AI assistants, BUDDHI is built for trust, accuracy, and governance in high-stakes business environments.
 
-  <p class="tagline">
-    <strong>BUDDHI</strong> is a local, privacy-first, multimodal reasoning system designed to assist
-    <strong>corporate and managerial decision-making</strong> using
-    <strong>LLM-based Retrieval-Augmented Generation (RAG)</strong>.
-  </p>
+Core Objectives
 
-  <h2>🧠 What is BUDDHI?</h2>
+1.Enable evidence-based managerial decisions
+2.Preserve data privacy & regulatory compliance
+3.Provide explainable reasoning, not just answers
+4.Eliminate dependency on external cloud AI services
 
-  <p>
-    <strong>BUDDHI</strong> (derived from Sanskrit, meaning <em>intellect, discernment, decision-making</em>)
-    is an <strong>on-premise enterprise AI system</strong> that understands, reasons, and advises
-    using internal organizational data such as:
-  </p>
+Key Capabilities
+1. Multimodal Reasoning
+2. Reads PDFs, Excel files, and text documents
+3. Cross-verifies numbers across multiple sources
+4. Handles financial, operational, and strategic queries
+5. Enterprise-Grade RAG
+6. Context-aware retrieval
+7. Source-grounded answers
+8. Hallucination-resistant design
+9. Decision Intelligence
+10. Financial health analysis
+11. Risk & compliance reasoning
+12. Scenario and “what-if” evaluation
+13. Executive summaries
+14. Local & Secure
+15. Fully on-prem deployment
+16. No external data sharing
+17. Suitable for regulated industries (finance, healthcare, government)
 
-  <ul>
-    <li>Financial reports (PDF, Excel)</li>
-    <li>Operational documents</li>
-    <li>Policies &amp; compliance data</li>
-    <li>Structured and unstructured datasets</li>
-  </ul>
+Example Use Cases
 
-  <p>
-    Unlike generic AI assistants, <strong>BUDDHI is built for trust, accuracy, and governance</strong>
-    in high-stakes business environments.
-  </p>
-
-  <h2>🎯 Core Objectives</h2>
-
-  <ul>
-    <li>Enable <strong>evidence-based managerial decisions</strong></li>
-    <li>Preserve <strong>data privacy &amp; regulatory compliance</strong></li>
-    <li>Provide <strong>explainable reasoning</strong>, not just answers</li>
-    <li>Eliminate dependency on external cloud AI services</li>
-  </ul>
-
-  <h2>🏗️ System Architecture (High Level)</h2>
-
-  <pre>
-User Query
-   ↓
-Multimodal Ingestion (PDF | Excel | Text | Tables)
-   ↓
-Vector Store (Enterprise Knowledge Base)
-   ↓
-RAG Pipeline
-   ↓
-Local LLM Reasoning Core
-   ↓
-Verified, Context-Grounded Response
-  </pre>
-
-  <h2>🔍 Key Capabilities</h2>
-
-  <h3>✅ Multimodal Reasoning</h3>
-  <ul>
-    <li>Reads <strong>PDFs, Excel files, and text documents</strong></li>
-    <li>Cross-verifies numbers across multiple sources</li>
-    <li>Handles financial, operational, and strategic queries</li>
-  </ul>
-
-  <h3>✅ Enterprise-Grade RAG</h3>
-  <ul>
-    <li>Context-aware retrieval</li>
-    <li>Source-grounded answers</li>
-    <li>Hallucination-resistant design</li>
-  </ul>
-
-  <h3>✅ Decision Intelligence</h3>
-  <ul>
-    <li>Financial health analysis</li>
-    <li>Risk &amp; compliance reasoning</li>
-    <li>Scenario and “what-if” evaluation</li>
-    <li>Executive summaries</li>
-  </ul>
-
-  <h3>✅ Local &amp; Secure</h3>
-  <ul>
-    <li>Fully <strong>on-prem deployment</strong></li>
-    <li>No external data sharing</li>
-    <li>Suitable for regulated industries (finance, healthcare, government)</li>
-  </ul>
-
-  <h2>📊 Example Use Cases</h2>
-
-  <ul>
-    <li>📈 Financial analysis &amp; ratio interpretation</li>
-    <li>🏦 Credit / loan approval assistance</li>
-    <li>📑 Audit &amp; compliance support</li>
-    <li>🧮 Cross-checking reports and spreadsheets</li>
-    <li>🧠 Executive decision summaries</li>
-    <li>⚠️ Risk identification and stress testing</li>
-  </ul>
-
-  <h2>🛠️ Supported Data Formats</h2>
-
-  <ul>
-    <li><strong>PDF</strong> – annual reports, statements, policies</li>
-    <li><strong>Excel (XLSX)</strong> – financials, models, tabular data</li>
-    <li><strong>Text / Markdown</strong> – notes, SOPs, documentation</li>
-  </ul>
-
-  <h2>🧪 Sample Queries</h2>
-
-  <ul>
-    <li>“Is the company financially healthy?”</li>
-    <li>“Calculate EBITDA margin and debt ratios.”</li>
-    <li>“Verify if Excel and PDF numbers match.”</li>
-    <li>“Should this firm qualify for a bank loan?”</li>
-    <li>“Summarize risks for senior management.”</li>
-  </ul>
-
-  <h2>🔐 Security &amp; Privacy</h2>
-
-  <ul>
-    <li>On-device / on-prem LLM inference</li>
-    <li>No telemetry or external API calls</li>
-    <li>Role-based access (optional)</li>
-    <li>Audit-friendly, explainable outputs</li>
-  </ul>
-
-  <h2>🚀 Intended Users</h2>
-
-  <ul>
-    <li>Corporate leadership &amp; CXOs</li>
-    <li>Finance &amp; strategy teams</li>
-    <li>Risk &amp; compliance officers</li>
-    <li>Analysts &amp; decision-makers</li>
-  </ul>
-
-  <h2>📌 Philosophy</h2>
-
-  <blockquote>
-    <strong>BUDDHI does not replace human judgment — it augments it.</strong>
-  </blockquote>
-
-  <p>
-    The system is designed to <strong>assist</strong>, not decide autonomously,
-    ensuring humans remain accountable while benefiting from intelligent reasoning support.
-  </p>
-
-  <h2>📖 Name Meaning</h2>
-
-  <p>
-    <strong>BUDDHI</strong> (बुद्धि):<br/>
-    <em>Intellect, wisdom, discernment — the faculty that enables sound decision-making.</em>
-  </p>
-
-  <footer>
-    © BUDDHI – Enterprise Reasoning Engine
-  </footer>
-
-</body>
-</html>
+1. Financial analysis & ratio interpretation
+2. Credit / loan approval assistance
+3. Audit & compliance support
+4. Cross-checking reports and spreadsheets
+5. Executive decision summaries
+6. Risk identification and stress testing
