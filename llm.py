@@ -4,15 +4,38 @@ import numpy as np
 import json
 import io
 import base64
+import subprocess
+import hashlib
 from datetime import datetime
+from typing import List, Dict, Any, Optional, Tuple
 import plotly.express as px
 import plotly.graph_objects as go
-from typing import List, Dict, Any, Optional
-import hashlib
+
+# Attempt imports with graceful fallbacks
+try:
+    from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMERS_AVAILABLE = False
+
+try:
+    import faiss
+    FAISS_AVAILABLE = True
+except ImportError:
+    FAISS_AVAILABLE = False
+
+try:
+    import PyPDF2
+    import pytesseract
+    from pdf2image import convert_from_bytes
+    from PIL import Image
+    OCR_AVAILABLE = True
+except ImportError:
+    OCR_AVAILABLE = False
 
 # Configuration
 st.set_page_config(
-    page_title="Financial Decision Assistant",
+    page_title="Financial RAG Assistant",
     page_icon="💰",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -24,7 +47,9 @@ st.markdown("""
     .main-header {
         font-size: 2.5rem;
         font-weight: 700;
-        color: #1f77b4;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
         text-align: center;
         margin-bottom: 2rem;
     }
@@ -34,6 +59,7 @@ st.markdown("""
         border-radius: 10px;
         color: white;
         margin: 1rem 0;
+        font-weight: 600;
     }
     .insight-box {
         background: #f0f8ff;
@@ -42,12 +68,13 @@ st.markdown("""
         border-radius: 5px;
         margin: 1rem 0;
     }
-    .metric-card {
-        background: white;
-        padding: 1rem;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        text-align: center;
+    .status-success {
+        color: #10b981;
+        font-weight: 600;
+    }
+    .status-warning {
+        color: #f59e0b;
+        font-weight: 600;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -55,685 +82,610 @@ st.markdown("""
 # Initialize session state
 if 'knowledge_base' not in st.session_state:
     st.session_state.knowledge_base = []
+if 'vector_store' not in st.session_state:
+    st.session_state.vector_store = None
+if 'embeddings_model' not in st.session_state:
+    st.session_state.embeddings_model = None
 if 'conversation_history' not in st.session_state:
     st.session_state.conversation_history = []
-if 'embeddings_cache' not in st.session_state:
-    st.session_state.embeddings_cache = {}
 
 # ============================================================================
-# MODULE 1: MULTIMODAL PREPROCESSING
+# EMBEDDING MODULE
 # ============================================================================
 
-class MultimodalPreprocessor:
-    """Handles file chunking, embedding, and feature extraction"""
+class EmbeddingEngine:
+    """Handles embeddings with fallback strategy"""
     
-    @staticmethod
-    def process_csv(file) -> Dict[str, Any]:
-        """Process CSV files"""
-        df = pd.read_csv(file)
-        
-        # Extract features
-        features = {
-            'type': 'tabular',
-            'shape': df.shape,
-            'columns': df.columns.tolist(),
-            'dtypes': df.dtypes.astype(str).to_dict(),
-            'numerical_summary': df.describe().to_dict() if len(df.select_dtypes(include=[np.number]).columns) > 0 else {},
-            'sample_data': df.head(10).to_dict('records'),
-            'text_representation': df.to_string()
-        }
-        
-        # Create chunks
-        chunks = []
-        chunk_size = 50
-        for i in range(0, len(df), chunk_size):
-            chunk_df = df.iloc[i:i+chunk_size]
-            chunks.append({
-                'chunk_id': i // chunk_size,
-                'data': chunk_df.to_dict('records'),
-                'text': chunk_df.to_string()
-            })
-        
-        return {
-            'features': features,
-            'chunks': chunks,
-            'raw_data': df
-        }
+    def __init__(self):
+        self.model = None
+        self.embedding_dim = 384  # Default for all-MiniLM-L6-v2
+        self.method = self._initialize_model()
     
-    @staticmethod
-    def process_excel(file) -> Dict[str, Any]:
-        """Process Excel files"""
-        df = pd.read_excel(file)
-        return MultimodalPreprocessor.process_csv(io.StringIO(df.to_csv(index=False)))
+    def _initialize_model(self) -> str:
+        """Initialize embedding model with fallback"""
+        if SENTENCE_TRANSFORMERS_AVAILABLE:
+            try:
+                self.model = SentenceTransformer('all-MiniLM-L6-v2')
+                self.embedding_dim = 384
+                return "sentence-transformers"
+            except Exception as e:
+                st.warning(f"Failed to load sentence-transformers: {e}")
+        
+        # Fallback to hash-based
+        self.embedding_dim = 256
+        return "hash-based"
     
-    @staticmethod
-    def process_text(text: str) -> Dict[str, Any]:
-        """Process text input"""
-        # Split into sentences for chunking
-        sentences = [s.strip() for s in text.split('.') if s.strip()]
-        
-        chunks = []
-        chunk_size = 3
-        for i in range(0, len(sentences), chunk_size):
-            chunk_text = '. '.join(sentences[i:i+chunk_size])
-            chunks.append({
-                'chunk_id': i // chunk_size,
-                'text': chunk_text
-            })
-        
-        features = {
-            'type': 'text',
-            'length': len(text),
-            'word_count': len(text.split()),
-            'sentence_count': len(sentences)
-        }
-        
-        return {
-            'features': features,
-            'chunks': chunks,
-            'raw_data': text
-        }
+    def encode(self, texts: List[str]) -> np.ndarray:
+        """Encode texts to embeddings"""
+        if self.method == "sentence-transformers":
+            return self.model.encode(texts, convert_to_numpy=True)
+        else:
+            return np.array([self._hash_embedding(text) for text in texts])
     
-    @staticmethod
-    def create_embedding(text: str) -> List[float]:
-        """Create simple embedding using hash-based vectorization"""
-        # Simple embedding: use character frequency and hash
-        vector = [0.0] * 128
+    def _hash_embedding(self, text: str) -> np.ndarray:
+        """Create hash-based embedding"""
+        vector = np.zeros(self.embedding_dim)
         
-        # Character frequency
+        # Character frequency features
         for char in text.lower():
-            idx = ord(char) % 128
+            idx = ord(char) % self.embedding_dim
             vector[idx] += 1
         
-        # Normalize
-        magnitude = sum(v**2 for v in vector) ** 0.5
-        if magnitude > 0:
-            vector = [v / magnitude for v in vector]
+        # Word-level features
+        words = text.lower().split()
+        for word in words[:50]:  # Limit to 50 words
+            hash_val = int(hashlib.md5(word.encode()).hexdigest(), 16)
+            idx = hash_val % self.embedding_dim
+            vector[idx] += 2
         
-        # Add some hash-based features
-        hash_val = int(hashlib.md5(text.encode()).hexdigest(), 16)
-        for i in range(len(vector)):
-            vector[i] += ((hash_val >> i) & 1) * 0.1
+        # Normalize
+        norm = np.linalg.norm(vector)
+        if norm > 0:
+            vector = vector / norm
         
         return vector
-    
-    @staticmethod
-    def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
-        """Calculate cosine similarity between two vectors"""
-        dot_product = sum(a * b for a, b in zip(vec1, vec2))
-        magnitude1 = sum(a**2 for a in vec1) ** 0.5
-        magnitude2 = sum(b**2 for b in vec2) ** 0.5
-        
-        if magnitude1 == 0 or magnitude2 == 0:
-            return 0.0
-        
-        return dot_product / (magnitude1 * magnitude2)
 
 # ============================================================================
-# MODULE 2: CONTEXT EVALUATION
+# VECTOR STORE MODULE
 # ============================================================================
 
-class ContextEvaluator:
-    """Evaluates whether query needs RAG lookup"""
+class VectorStore:
+    """In-memory vector store with FAISS or NumPy fallback"""
     
-    @staticmethod
-    def evaluate_query(query: str, knowledge_base: List[Dict]) -> Dict[str, Any]:
-        """Determine if query needs external context"""
+    def __init__(self, embedding_dim: int):
+        self.embedding_dim = embedding_dim
+        self.documents = []
+        self.embeddings = None
+        self.method = "faiss" if FAISS_AVAILABLE else "numpy"
         
-        # Keywords that suggest need for data
-        data_keywords = ['analyze', 'compare', 'calculate', 'show', 'data', 'report', 
-                        'trend', 'forecast', 'budget', 'expense', 'revenue', 'profit']
+        if FAISS_AVAILABLE:
+            self.index = faiss.IndexFlatL2(embedding_dim)
+        else:
+            self.index = None
+    
+    def add_documents(self, docs: List[Dict], embeddings: np.ndarray):
+        """Add documents and their embeddings to the store"""
+        self.documents.extend(docs)
         
-        # Check if query contains data keywords
-        needs_rag = any(keyword in query.lower() for keyword in data_keywords)
+        if self.method == "faiss":
+            self.index.add(embeddings.astype('float32'))
+        else:
+            if self.embeddings is None:
+                self.embeddings = embeddings
+            else:
+                self.embeddings = np.vstack([self.embeddings, embeddings])
+    
+    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Tuple[Dict, float]]:
+        """Search for similar documents"""
+        if len(self.documents) == 0:
+            return []
         
-        # Check if we have relevant data in knowledge base
-        has_relevant_data = len(knowledge_base) > 0
+        query_embedding = query_embedding.reshape(1, -1)
         
+        if self.method == "faiss":
+            distances, indices = self.index.search(query_embedding.astype('float32'), top_k)
+            results = []
+            for idx, dist in zip(indices[0], distances[0]):
+                if idx < len(self.documents):
+                    # Convert L2 distance to similarity score
+                    similarity = 1 / (1 + dist)
+                    results.append((self.documents[idx], similarity))
+            return results
+        else:
+            # NumPy cosine similarity
+            similarities = np.dot(self.embeddings, query_embedding.T).flatten()
+            top_indices = np.argsort(similarities)[-top_k:][::-1]
+            return [(self.documents[idx], similarities[idx]) for idx in top_indices]
+    
+    def get_stats(self) -> Dict:
+        """Get vector store statistics"""
         return {
-            'needs_rag': needs_rag and has_relevant_data,
-            'confidence': 0.8 if needs_rag else 0.3,
-            'reason': 'Query requires data analysis' if needs_rag else 'Simple query can be answered directly'
+            'method': self.method,
+            'num_documents': len(self.documents),
+            'embedding_dim': self.embedding_dim
         }
 
 # ============================================================================
-# MODULE 3: RAG LOOKUP
+# PDF OCR MODULE
 # ============================================================================
 
-class RAGRetriever:
-    """Retrieves relevant context from knowledge base"""
+class PDFProcessor:
+    """Process PDFs with OCR capability"""
     
-    def __init__(self, preprocessor: MultimodalPreprocessor):
-        self.preprocessor = preprocessor
+    @staticmethod
+    def extract_text_from_pdf(file) -> str:
+        """Extract text from PDF with OCR fallback"""
+        text = ""
+        
+        try:
+            # Try standard PDF text extraction first
+            pdf_reader = PyPDF2.PdfReader(file)
+            for page in pdf_reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+            
+            # If no text found, try OCR
+            if not text.strip() and OCR_AVAILABLE:
+                file.seek(0)
+                text = PDFProcessor._ocr_pdf(file)
+        
+        except Exception as e:
+            st.error(f"Error processing PDF: {e}")
+            
+            # Try OCR as fallback
+            if OCR_AVAILABLE:
+                try:
+                    file.seek(0)
+                    text = PDFProcessor._ocr_pdf(file)
+                except Exception as ocr_error:
+                    st.error(f"OCR failed: {ocr_error}")
+        
+        return text
     
-    def retrieve(self, query: str, knowledge_base: List[Dict], top_k: int = 3) -> Dict[str, Any]:
-        """Retrieve relevant chunks from knowledge base"""
+    @staticmethod
+    def _ocr_pdf(file) -> str:
+        """Perform OCR on PDF"""
+        text = ""
         
-        if not knowledge_base:
-            return {
-                'sufficient': False,
-                'contexts': [],
-                'scores': []
-            }
+        try:
+            # Convert PDF to images
+            file.seek(0)
+            images = convert_from_bytes(file.read())
+            
+            # OCR each page
+            for i, image in enumerate(images):
+                page_text = pytesseract.image_to_string(image)
+                text += f"\n--- Page {i+1} ---\n{page_text}\n"
         
-        # Create query embedding
-        query_embedding = self.preprocessor.create_embedding(query)
+        except Exception as e:
+            raise Exception(f"OCR processing failed: {e}")
         
-        # Calculate similarity scores for all chunks
-        all_chunks = []
-        for kb_item in knowledge_base:
-            for chunk in kb_item['chunks']:
-                chunk_text = chunk.get('text', str(chunk.get('data', '')))
-                chunk_embedding = self.preprocessor.create_embedding(chunk_text)
-                similarity = self.preprocessor.cosine_similarity(query_embedding, chunk_embedding)
-                
-                all_chunks.append({
-                    'chunk': chunk,
-                    'source': kb_item['source'],
-                    'similarity': similarity,
-                    'features': kb_item['features']
+        return text
+
+# ============================================================================
+# DOCUMENT CHUNKING MODULE
+# ============================================================================
+
+class DocumentChunker:
+    """Chunk documents into smaller pieces"""
+    
+    @staticmethod
+    def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[Dict]:
+        """Chunk text with overlap"""
+        chunks = []
+        words = text.split()
+        
+        for i in range(0, len(words), chunk_size - overlap):
+            chunk_words = words[i:i + chunk_size]
+            chunk_text = ' '.join(chunk_words)
+            
+            if chunk_text.strip():
+                chunks.append({
+                    'text': chunk_text,
+                    'chunk_id': len(chunks),
+                    'start_idx': i,
+                    'word_count': len(chunk_words)
                 })
         
-        # Sort by similarity
-        all_chunks.sort(key=lambda x: x['similarity'], reverse=True)
-        
-        # Get top-k
-        top_chunks = all_chunks[:top_k]
-        
-        # Evaluate sufficiency
-        sufficient = len(top_chunks) > 0 and top_chunks[0]['similarity'] > 0.3
-        
-        return {
-            'sufficient': sufficient,
-            'contexts': top_chunks,
-            'scores': [c['similarity'] for c in top_chunks]
-        }
-
-# ============================================================================
-# MODULE 4: INFERENCE MODULE
-# ============================================================================
-
-class InferenceEngine:
-    """Performs reasoning and answer generation"""
+        return chunks
     
     @staticmethod
-    def generate_insight(query: str, contexts: List[Dict], direct_answer: bool = False) -> Dict[str, Any]:
-        """Generate financial insights based on query and context"""
+    def chunk_dataframe(df: pd.DataFrame, rows_per_chunk: int = 50) -> List[Dict]:
+        """Chunk dataframe into smaller pieces"""
+        chunks = []
         
-        if direct_answer:
-            return InferenceEngine._direct_inference(query)
-        
-        # Analyze retrieved contexts
-        analysis = InferenceEngine._analyze_contexts(contexts)
-        
-        # Generate recommendations
-        recommendations = InferenceEngine._generate_recommendations(query, analysis)
-        
-        # Create visualization data
-        viz_data = InferenceEngine._prepare_visualizations(contexts)
-        
-        return {
-            'analysis': analysis,
-            'recommendations': recommendations,
-            'visualizations': viz_data,
-            'confidence': analysis.get('confidence', 0.7)
-        }
-    
-    @staticmethod
-    def _direct_inference(query: str) -> Dict[str, Any]:
-        """Handle queries that don't need RAG"""
-        
-        # Simple rule-based responses for common financial queries
-        response = {
-            'analysis': {
-                'summary': 'Based on general financial principles:',
-                'key_points': []
-            },
-            'recommendations': [],
-            'visualizations': None,
-            'confidence': 0.6
-        }
-        
-        query_lower = query.lower()
-        
-        if 'budget' in query_lower:
-            response['analysis']['key_points'] = [
-                'Create a detailed budget tracking income and expenses',
-                'Follow the 50/30/20 rule: 50% needs, 30% wants, 20% savings',
-                'Review and adjust monthly'
-            ]
-            response['recommendations'] = [
-                'Start tracking all expenses',
-                'Set specific savings goals',
-                'Use budgeting tools or apps'
-            ]
-        
-        elif 'invest' in query_lower:
-            response['analysis']['key_points'] = [
-                'Diversification reduces risk',
-                'Consider your risk tolerance and time horizon',
-                'Regular contributions benefit from dollar-cost averaging'
-            ]
-            response['recommendations'] = [
-                'Start with index funds for broad market exposure',
-                'Maintain an emergency fund first',
-                'Consider consulting a financial advisor'
-            ]
-        
-        elif 'save' in query_lower or 'saving' in query_lower:
-            response['analysis']['key_points'] = [
-                'Build an emergency fund (3-6 months expenses)',
-                'Automate savings to make it consistent',
-                'Use high-yield savings accounts'
-            ]
-            response['recommendations'] = [
-                'Set up automatic transfers to savings',
-                'Cut unnecessary subscriptions',
-                'Look for better interest rates'
-            ]
-        
-        else:
-            response['analysis']['key_points'] = [
-                'Financial planning requires understanding your current situation',
-                'Set clear, measurable goals',
-                'Regular review and adjustment is key'
-            ]
-            response['recommendations'] = [
-                'Define your financial goals',
-                'Gather all financial documents',
-                'Consider seeking professional advice'
-            ]
-        
-        return response
-    
-    @staticmethod
-    def _analyze_contexts(contexts: List[Dict]) -> Dict[str, Any]:
-        """Analyze retrieved contexts"""
-        
-        analysis = {
-            'summary': '',
-            'key_points': [],
-            'metrics': {},
-            'confidence': 0.0
-        }
-        
-        if not contexts:
-            return analysis
-        
-        # Extract numerical data
-        numerical_data = []
-        for ctx in contexts:
-            if ctx['features']['type'] == 'tabular':
-                numerical_data.append(ctx['features'].get('numerical_summary', {}))
-        
-        # Generate summary
-        analysis['summary'] = f"Analyzed {len(contexts)} relevant data sources"
-        
-        # Extract key points
-        for i, ctx in enumerate(contexts[:3]):
-            score = ctx['similarity']
-            analysis['key_points'].append(
-                f"Source {i+1} (relevance: {score:.2%}): {ctx['source']}"
-            )
-        
-        # Calculate confidence
-        if contexts:
-            analysis['confidence'] = sum(c['similarity'] for c in contexts) / len(contexts)
-        
-        # Aggregate metrics
-        if numerical_data:
-            analysis['metrics'] = numerical_data[0]  # Use first source's metrics
-        
-        return analysis
-    
-    @staticmethod
-    def _generate_recommendations(query: str, analysis: Dict) -> List[str]:
-        """Generate actionable recommendations"""
-        
-        recommendations = []
-        
-        # Based on confidence level
-        if analysis['confidence'] > 0.7:
-            recommendations.append("High confidence in analysis - recommendations are data-driven")
-        else:
-            recommendations.append("Moderate confidence - consider gathering more data")
-        
-        # Query-specific recommendations
-        query_lower = query.lower()
-        
-        if 'expense' in query_lower or 'cost' in query_lower:
-            recommendations.extend([
-                "Review expense categories for optimization opportunities",
-                "Identify top 3 expense categories for reduction",
-                "Set spending limits for discretionary categories"
-            ])
-        
-        elif 'revenue' in query_lower or 'income' in query_lower:
-            recommendations.extend([
-                "Analyze revenue trends for growth patterns",
-                "Identify highest performing revenue streams",
-                "Explore diversification opportunities"
-            ])
-        
-        elif 'profit' in query_lower or 'margin' in query_lower:
-            recommendations.extend([
-                "Focus on improving high-margin products/services",
-                "Review cost structure for optimization",
-                "Consider pricing strategy adjustments"
-            ])
-        
-        else:
-            recommendations.extend([
-                "Conduct comprehensive financial review",
-                "Set measurable financial goals",
-                "Implement regular monitoring and reporting"
-            ])
-        
-        return recommendations
-    
-    @staticmethod
-    def _prepare_visualizations(contexts: List[Dict]) -> Optional[Dict]:
-        """Prepare data for visualizations"""
-        
-        viz_data = {
-            'has_viz': False,
-            'charts': []
-        }
-        
-        for ctx in contexts:
-            if ctx['features']['type'] == 'tabular':
-                viz_data['has_viz'] = True
-                viz_data['source_data'] = ctx['chunk'].get('data', [])
-                break
-        
-        return viz_data if viz_data['has_viz'] else None
-
-# ============================================================================
-# MODULE 5: POST-PROCESSING
-# ============================================================================
-
-class PostProcessor:
-    """Response refinement and optimization"""
-    
-    @staticmethod
-    def refine_response(insight: Dict) -> Dict[str, Any]:
-        """Refine and structure the final response"""
-        
-        refined = {
-            'executive_summary': PostProcessor._create_executive_summary(insight),
-            'detailed_analysis': insight['analysis'],
-            'recommendations': PostProcessor._prioritize_recommendations(insight['recommendations']),
-            'supporting_data': insight.get('visualizations'),
-            'confidence_level': PostProcessor._interpret_confidence(insight['confidence']),
-            'next_steps': PostProcessor._generate_next_steps(insight)
-        }
-        
-        return refined
-    
-    @staticmethod
-    def _create_executive_summary(insight: Dict) -> str:
-        """Create concise executive summary"""
-        
-        analysis = insight['analysis']
-        confidence = insight['confidence']
-        
-        summary = f"Financial Analysis Summary (Confidence: {confidence:.0%})\n\n"
-        summary += analysis.get('summary', 'Analysis completed based on available data.')
-        
-        return summary
-    
-    @staticmethod
-    def _prioritize_recommendations(recommendations: List[str]) -> List[Dict]:
-        """Prioritize and categorize recommendations"""
-        
-        prioritized = []
-        for i, rec in enumerate(recommendations):
-            priority = 'High' if i < 2 else 'Medium' if i < 4 else 'Low'
-            prioritized.append({
-                'priority': priority,
-                'action': rec,
-                'timeframe': 'Immediate' if i < 2 else 'Short-term'
+        for i in range(0, len(df), rows_per_chunk):
+            chunk_df = df.iloc[i:i + rows_per_chunk]
+            
+            # Create text representation
+            text_repr = chunk_df.to_string(index=False)
+            
+            chunks.append({
+                'text': text_repr,
+                'chunk_id': len(chunks),
+                'data': chunk_df.to_dict('records'),
+                'shape': chunk_df.shape,
+                'columns': chunk_df.columns.tolist()
             })
         
-        return prioritized
-    
-    @staticmethod
-    def _interpret_confidence(confidence: float) -> str:
-        """Interpret confidence score"""
-        
-        if confidence > 0.8:
-            return "High - Strong data support"
-        elif confidence > 0.6:
-            return "Moderate - Reasonable data support"
-        else:
-            return "Low - Limited data available"
-    
-    @staticmethod
-    def _generate_next_steps(insight: Dict) -> List[str]:
-        """Generate actionable next steps"""
-        
-        return [
-            "Review the detailed analysis and recommendations",
-            "Prioritize high-priority actions for immediate implementation",
-            "Set up monitoring metrics to track progress",
-            "Schedule follow-up review in 30 days"
-        ]
+        return chunks
 
 # ============================================================================
-# MAIN APPLICATION
+# OLLAMA LLM MODULE
+# ============================================================================
+
+class OllamaLLM:
+    """Interface to Ollama local LLM"""
+    
+    def __init__(self, model_id: str = "llama3.2:latest"):
+        self.model_id = model_id
+        self.available = self._check_ollama()
+    
+    def _check_ollama(self) -> bool:
+        """Check if Ollama is available"""
+        try:
+            result = subprocess.run(
+                ['ollama', 'list'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+    
+    def generate(self, prompt: str, context: str = "") -> str:
+        """Generate response using Ollama"""
+        if not self.available:
+            return self._fallback_response(prompt, context)
+        
+        try:
+            # Construct full prompt
+            full_prompt = f"""You are a financial analysis assistant. Use the following context to answer the question.
+
+Context:
+{context}
+
+Question: {prompt}
+
+Provide a clear, concise, and actionable financial analysis. Include specific recommendations.
+
+Answer:"""
+            
+            # Call Ollama
+            result = subprocess.run(
+                ['ollama', 'run', self.model_id, full_prompt],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            if result.returncode == 0:
+                return result.stdout.strip()
+            else:
+                return self._fallback_response(prompt, context)
+        
+        except Exception as e:
+            st.warning(f"Ollama error: {e}. Using fallback.")
+            return self._fallback_response(prompt, context)
+    
+    def _fallback_response(self, prompt: str, context: str) -> str:
+        """Fallback response when Ollama is unavailable"""
+        response = f"""**Financial Analysis** (Rule-based response - Ollama unavailable)
+
+Based on the query: "{prompt}"
+
+"""
+        
+        if context:
+            response += "**Context Summary:**\n"
+            response += context[:500] + "...\n\n"
+        
+        response += """**General Recommendations:**
+1. Review your current financial position thoroughly
+2. Identify key areas for optimization
+3. Set specific, measurable financial goals
+4. Create an action plan with timelines
+5. Monitor progress regularly
+
+**Next Steps:**
+- Ensure Ollama is installed: `curl -fsSL https://ollama.com/install.sh | sh`
+- Pull the model: `ollama pull llama3.2:latest`
+- Restart the application
+
+For more detailed analysis, please ensure Ollama is running."""
+        
+        return response
+
+# ============================================================================
+# MAIN RAG PIPELINE
+# ============================================================================
+
+class RAGPipeline:
+    """Complete RAG pipeline"""
+    
+    def __init__(self):
+        self.embedding_engine = EmbeddingEngine()
+        self.vector_store = VectorStore(self.embedding_engine.embedding_dim)
+        self.llm = OllamaLLM()
+        self.chunker = DocumentChunker()
+    
+    def process_document(self, file, file_type: str) -> Dict:
+        """Process uploaded document"""
+        try:
+            # Extract text
+            if file_type == 'pdf':
+                text = PDFProcessor.extract_text_from_pdf(file)
+                chunks = self.chunker.chunk_text(text)
+            elif file_type in ['csv', 'xlsx']:
+                df = pd.read_csv(file) if file_type == 'csv' else pd.read_excel(file)
+                chunks = self.chunker.chunk_dataframe(df)
+            else:  # txt
+                text = file.read().decode('utf-8')
+                chunks = self.chunker.chunk_text(text)
+            
+            # Create embeddings
+            chunk_texts = [chunk['text'] for chunk in chunks]
+            embeddings = self.embedding_engine.encode(chunk_texts)
+            
+            # Add metadata
+            for chunk in chunks:
+                chunk['source'] = file.name
+                chunk['timestamp'] = datetime.now().isoformat()
+            
+            # Add to vector store
+            self.vector_store.add_documents(chunks, embeddings)
+            
+            return {
+                'success': True,
+                'num_chunks': len(chunks),
+                'source': file.name
+            }
+        
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
+    def query(self, question: str, top_k: int = 5) -> Dict:
+        """Query the RAG system"""
+        # Embed query
+        query_embedding = self.embedding_engine.encode([question])[0]
+        
+        # Retrieve relevant documents
+        results = self.vector_store.search(query_embedding, top_k=top_k)
+        
+        # Prepare context
+        context = "\n\n".join([
+            f"[Source: {doc['source']}]\n{doc['text'][:500]}"
+            for doc, score in results
+        ])
+        
+        # Generate response
+        response = self.llm.generate(question, context)
+        
+        return {
+            'answer': response,
+            'retrieved_docs': results,
+            'num_sources': len(results)
+        }
+
+# ============================================================================
+# STREAMLIT UI
 # ============================================================================
 
 def main():
     # Header
-    st.markdown('<h1 class="main-header">💰 Financial Decision Assistant</h1>', unsafe_allow_html=True)
-    st.markdown("### Multimodal RAG-Powered Financial Analysis System")
+    st.markdown('<h1 class="main-header">💰 Financial RAG Assistant</h1>', unsafe_allow_html=True)
+    st.markdown("### Advanced RAG with OCR, Embeddings & Local LLM")
     
-    # Sidebar
-    with st.sidebar:
-        st.header("📊 Knowledge Base")
+    # Initialize pipeline
+    if 'rag_pipeline' not in st.session_state:
+        with st.spinner("Initializing RAG pipeline..."):
+            st.session_state.rag_pipeline = RAGPipeline()
+    
+    pipeline = st.session_state.rag_pipeline
+    
+    # System Status
+    with st.expander("🔧 System Status", expanded=False):
+        col1, col2, col3, col4 = st.columns(4)
         
-        # File upload
+        with col1:
+            st.markdown("**Embeddings:**")
+            if SENTENCE_TRANSFORMERS_AVAILABLE:
+                st.markdown('<span class="status-success">✓ Sentence Transformers</span>', unsafe_allow_html=True)
+            else:
+                st.markdown('<span class="status-warning">⚠ Hash-based</span>', unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown("**Vector Store:**")
+            if FAISS_AVAILABLE:
+                st.markdown('<span class="status-success">✓ FAISS</span>', unsafe_allow_html=True)
+            else:
+                st.markdown('<span class="status-warning">⚠ NumPy</span>', unsafe_allow_html=True)
+        
+        with col3:
+            st.markdown("**OCR:**")
+            if OCR_AVAILABLE:
+                st.markdown('<span class="status-success">✓ Available</span>', unsafe_allow_html=True)
+            else:
+                st.markdown('<span class="status-warning">⚠ Limited</span>', unsafe_allow_html=True)
+        
+        with col4:
+            st.markdown("**LLM:**")
+            if pipeline.llm.available:
+                st.markdown('<span class="status-success">✓ Ollama</span>', unsafe_allow_html=True)
+            else:
+                st.markdown('<span class="status-warning">⚠ Fallback</span>', unsafe_allow_html=True)
+        
+        # Vector store stats
+        stats = pipeline.vector_store.get_stats()
+        st.info(f"📊 Vector Store: {stats['num_documents']} chunks | Dimension: {stats['embedding_dim']} | Method: {stats['method']}")
+    
+    # Sidebar - Document Upload
+    with st.sidebar:
+        st.header("📚 Document Upload")
+        
         uploaded_files = st.file_uploader(
-            "Upload financial data (CSV, XLSX, TXT)",
-            type=['csv', 'xlsx', 'txt'],
-            accept_multiple_files=True
+            "Upload documents",
+            type=['pdf', 'csv', 'xlsx', 'txt'],
+            accept_multiple_files=True,
+            help="Supports PDF (with OCR), CSV, XLSX, and TXT files"
         )
         
         if uploaded_files:
-            preprocessor = MultimodalPreprocessor()
-            
-            for file in uploaded_files:
-                file_id = f"{file.name}_{file.size}"
+            if st.button("Process Documents", type="primary"):
+                progress_bar = st.progress(0)
+                status_text = st.empty()
                 
-                # Check if already processed
-                if file_id not in [kb['id'] for kb in st.session_state.knowledge_base]:
-                    # Process file
-                    if file.name.endswith('.csv'):
-                        processed = preprocessor.process_csv(file)
-                    elif file.name.endswith('.xlsx'):
-                        processed = preprocessor.process_excel(file)
-                    else:
-                        content = file.read().decode('utf-8')
-                        processed = preprocessor.process_text(content)
+                for i, file in enumerate(uploaded_files):
+                    status_text.text(f"Processing {file.name}...")
                     
-                    # Add to knowledge base
-                    st.session_state.knowledge_base.append({
-                        'id': file_id,
-                        'source': file.name,
-                        'timestamp': datetime.now().isoformat(),
-                        'features': processed['features'],
-                        'chunks': processed['chunks']
-                    })
+                    # Determine file type
+                    file_type = file.name.split('.')[-1].lower()
+                    
+                    # Process document
+                    result = pipeline.process_document(file, file_type)
+                    
+                    if result['success']:
+                        st.success(f"✓ {file.name}: {result['num_chunks']} chunks")
+                    else:
+                        st.error(f"✗ {file.name}: {result['error']}")
+                    
+                    progress_bar.progress((i + 1) / len(uploaded_files))
+                
+                status_text.text("Processing complete!")
+                st.balloons()
         
-        # Display knowledge base stats
-        st.metric("Documents Loaded", len(st.session_state.knowledge_base))
-        
-        if st.session_state.knowledge_base:
-            total_chunks = sum(len(kb['chunks']) for kb in st.session_state.knowledge_base)
-            st.metric("Total Chunks", total_chunks)
+        # Knowledge base stats
+        st.markdown("---")
+        st.header("📊 Knowledge Base")
+        stats = pipeline.vector_store.get_stats()
+        st.metric("Total Chunks", stats['num_documents'])
+        st.metric("Embedding Method", pipeline.embedding_engine.method)
         
         if st.button("Clear Knowledge Base"):
-            st.session_state.knowledge_base = []
+            st.session_state.rag_pipeline = RAGPipeline()
             st.rerun()
     
-    # Main content
-    col1, col2 = st.columns([2, 1])
+    # Main Query Interface
+    st.header("🔍 Ask a Financial Question")
+    
+    col1, col2 = st.columns([3, 1])
     
     with col1:
-        st.header("🔍 Query Input")
         query = st.text_area(
-            "Enter your financial question or request:",
-            placeholder="e.g., Analyze my expenses and suggest where I can save money",
-            height=100
+            "Enter your question:",
+            placeholder="e.g., Analyze my quarterly expenses and suggest cost reduction strategies",
+            height=120,
+            key="query_input"
         )
-        
-        col_a, col_b = st.columns(2)
-        with col_a:
-            analyze_btn = st.button("🚀 Analyze", type="primary", use_container_width=True)
-        with col_b:
-            if st.button("Clear History", use_container_width=True):
-                st.session_state.conversation_history = []
-                st.rerun()
     
     with col2:
-        st.header("⚙️ Settings")
-        top_k = st.slider("Context Chunks to Retrieve", 1, 5, 3)
-        show_process = st.checkbox("Show Processing Steps", value=True)
+        st.markdown("**Settings**")
+        top_k = st.slider("Context Chunks", 1, 10, 5)
+        show_sources = st.checkbox("Show Sources", value=True)
     
-    # Process query
+    col_a, col_b = st.columns([1, 1])
+    with col_a:
+        analyze_btn = st.button("🚀 Analyze", type="primary", use_container_width=True)
+    with col_b:
+        if st.button("Clear History", use_container_width=True):
+            st.session_state.conversation_history = []
+            st.rerun()
+    
+    # Process Query
     if analyze_btn and query:
-        with st.spinner("Processing your query..."):
-            # Initialize components
-            preprocessor = MultimodalPreprocessor()
-            evaluator = ContextEvaluator()
-            retriever = RAGRetriever(preprocessor)
-            inference_engine = InferenceEngine()
-            post_processor = PostProcessor()
-            
-            # Step 1: Context Evaluation
-            if show_process:
-                st.markdown('<div class="module-box">📋 Step 1: Context Evaluation</div>', unsafe_allow_html=True)
-            
-            evaluation = evaluator.evaluate_query(query, st.session_state.knowledge_base)
-            
-            if show_process:
-                st.info(f"**Decision:** {'Use RAG' if evaluation['needs_rag'] else 'Direct Answer'} | **Confidence:** {evaluation['confidence']:.0%}")
-            
-            # Step 2: RAG Lookup or Direct Inference
-            if evaluation['needs_rag']:
-                if show_process:
-                    st.markdown('<div class="module-box">🔎 Step 2: RAG Retrieval</div>', unsafe_allow_html=True)
+        if pipeline.vector_store.get_stats()['num_documents'] == 0:
+            st.warning("⚠️ Please upload documents first!")
+        else:
+            with st.spinner("🧠 Analyzing with RAG pipeline..."):
+                # Query the system
+                result = pipeline.query(query, top_k=top_k)
                 
-                retrieval_result = retriever.retrieve(query, st.session_state.knowledge_base, top_k=top_k)
+                # Display Results
+                st.markdown("---")
+                st.markdown('<div class="module-box">📊 Financial Analysis Report</div>', unsafe_allow_html=True)
                 
-                if show_process:
-                    st.success(f"Retrieved {len(retrieval_result['contexts'])} relevant contexts")
-                    if retrieval_result['contexts']:
-                        for i, ctx in enumerate(retrieval_result['contexts'][:3]):
-                            st.write(f"- Context {i+1}: {ctx['source']} (Score: {ctx['similarity']:.2%})")
+                # Main Answer
+                st.markdown('<div class="insight-box">', unsafe_allow_html=True)
+                st.markdown("### 💡 Analysis & Recommendations")
+                st.markdown(result['answer'])
+                st.markdown('</div>', unsafe_allow_html=True)
                 
-                # Step 3: Inference
-                if show_process:
-                    st.markdown('<div class="module-box">🧠 Step 3: Inference & Analysis</div>', unsafe_allow_html=True)
-                
-                insight = inference_engine.generate_insight(query, retrieval_result['contexts'])
-            else:
-                if show_process:
-                    st.markdown('<div class="module-box">🧠 Step 2: Direct Inference</div>', unsafe_allow_html=True)
-                
-                insight = inference_engine.generate_insight(query, [], direct_answer=True)
-            
-            # Step 4: Post-Processing
-            if show_process:
-                st.markdown('<div class="module-box">✨ Step 4: Response Refinement</div>', unsafe_allow_html=True)
-            
-            final_response = post_processor.refine_response(insight)
-            
-            # Display Results
-            st.markdown("---")
-            st.header("📊 Decision Insight Report")
-            
-            # Executive Summary
-            st.markdown('<div class="insight-box">', unsafe_allow_html=True)
-            st.subheader("Executive Summary")
-            st.write(final_response['executive_summary'])
-            st.markdown('</div>', unsafe_allow_html=True)
-            
-            # Key Findings
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Confidence Level", final_response['confidence_level'])
-            with col2:
-                st.metric("Recommendations", len(final_response['recommendations']))
-            with col3:
-                st.metric("Data Sources", len(st.session_state.knowledge_base))
-            
-            # Detailed Analysis
-            st.subheader("🔍 Detailed Analysis")
-            analysis = final_response['detailed_analysis']
-            st.write(analysis.get('summary', ''))
-            
-            if analysis.get('key_points'):
-                st.write("**Key Findings:**")
-                for point in analysis['key_points']:
-                    st.write(f"• {point}")
-            
-            # Recommendations
-            st.subheader("💡 Recommended Actions")
-            for rec in final_response['recommendations']:
-                priority_color = {"High": "🔴", "Medium": "🟡", "Low": "🟢"}
-                st.write(f"{priority_color[rec['priority']]} **{rec['priority']} Priority** ({rec['timeframe']})")
-                st.write(f"   {rec['action']}")
-                st.write("")
-            
-            # Visualizations
-            if final_response['supporting_data']:
-                st.subheader("📈 Data Visualizations")
-                viz_data = final_response['supporting_data']
-                
-                if viz_data.get('source_data'):
-                    df = pd.DataFrame(viz_data['source_data'])
+                # Retrieved Sources
+                if show_sources and result['retrieved_docs']:
+                    st.markdown("### 📖 Retrieved Context")
                     
-                    # Auto-detect numeric columns for visualization
-                    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-                    
-                    if len(numeric_cols) >= 1:
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            # Bar chart
-                            if len(numeric_cols) >= 1:
-                                fig = px.bar(df.head(10), y=numeric_cols[0], title=f"{numeric_cols[0]} Overview")
-                                st.plotly_chart(fig, use_container_width=True)
-                        
-                        with col2:
-                            # Line chart
-                            if len(numeric_cols) >= 1:
-                                fig = px.line(df.head(10), y=numeric_cols[0], title=f"{numeric_cols[0]} Trend")
-                                st.plotly_chart(fig, use_container_width=True)
-            
-            # Next Steps
-            st.subheader("🎯 Next Steps")
-            for i, step in enumerate(final_response['next_steps'], 1):
-                st.write(f"{i}. {step}")
-            
-            # Save to history
-            st.session_state.conversation_history.append({
-                'query': query,
-                'response': final_response,
-                'timestamp': datetime.now().isoformat()
-            })
+                    for i, (doc, score) in enumerate(result['retrieved_docs'][:3], 1):
+                        with st.expander(f"Source {i}: {doc['source']} (Relevance: {score:.2%})"):
+                            st.text(doc['text'][:500] + "...")
+                            st.caption(f"Chunk ID: {doc['chunk_id']} | Word Count: {doc.get('word_count', 'N/A')}")
+                
+                # Metadata
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Sources Used", result['num_sources'])
+                with col2:
+                    st.metric("LLM Status", "Ollama" if pipeline.llm.available else "Fallback")
+                with col3:
+                    st.metric("Embedding Method", pipeline.embedding_engine.method)
+                
+                # Save to history
+                st.session_state.conversation_history.append({
+                    'query': query,
+                    'answer': result['answer'],
+                    'timestamp': datetime.now().isoformat(),
+                    'num_sources': result['num_sources']
+                })
     
     # Conversation History
     if st.session_state.conversation_history:
         st.markdown("---")
-        st.header("📜 Conversation History")
+        st.header("📜 Recent Conversations")
         
         for i, conv in enumerate(reversed(st.session_state.conversation_history[-5:]), 1):
-            with st.expander(f"Query {len(st.session_state.conversation_history) - i + 1}: {conv['query'][:50]}..."):
-                st.write(f"**Query:** {conv['query']}")
-                st.write(f"**Timestamp:** {conv['timestamp']}")
-                st.write(f"**Confidence:** {conv['response']['confidence_level']}")
+            with st.expander(f"Q{len(st.session_state.conversation_history) - i + 1}: {conv['query'][:60]}..."):
+                st.markdown(f"**Question:** {conv['query']}")
+                st.markdown(f"**Answer:** {conv['answer'][:300]}...")
+                st.caption(f"Time: {conv['timestamp']} | Sources: {conv['num_sources']}")
+    
+    # Installation Guide
+    with st.expander("📦 Installation Guide"):
+        st.markdown("""
+        ### Required Dependencies
+        
+        ```bash
+        # Core dependencies
+        pip install streamlit pandas numpy plotly openpyxl
+        
+        # Embeddings (recommended)
+        pip install sentence-transformers
+        
+        # Vector store (recommended)
+        pip install faiss-cpu
+        
+        # PDF & OCR support
+        pip install PyPDF2 pytesseract pdf2image pillow
+        
+        # Install Tesseract (for OCR)
+        # Ubuntu/Debian: sudo apt-get install tesseract-ocr
+        # macOS: brew install tesseract
+        # Windows: Download from https://github.com/UB-Mannheim/tesseract/wiki
+        
+        # Install Ollama
+        curl -fsSL https://ollama.com/install.sh | sh
+        ollama pull llama3.2:latest
+        ```
+        
+        ### Optional: Poppler (for pdf2image)
+        ```bash
+        # Ubuntu/Debian: sudo apt-get install poppler-utils
+        # macOS: brew install poppler
+        ```
+        """)
 
 if __name__ == "__main__":
     main()
