@@ -35,8 +35,8 @@ except ImportError:
 
 # Configuration
 st.set_page_config(
-    page_title="Financial RAG Assistant",
-    page_icon="💰",
+    page_title="BUDDHI-Enterprise_Reasoning_Engine",
+    page_icon="🌳",
     layout="wide",
     initial_sidebar_state="expanded"
 )
