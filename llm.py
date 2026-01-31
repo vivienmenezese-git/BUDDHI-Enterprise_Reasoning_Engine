@@ -35,7 +35,7 @@ except ImportError:
 
 # Configuration
 st.set_page_config(
-    page_title="BUDDHI-Enterprise_Reasoning_Engine",
+    page_title="BUDDHI-Enterprise Reasoning Engine",
     page_icon="🌳",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -521,8 +521,8 @@ class RAGPipeline:
 
 def main():
     # Header
-    st.markdown('<h1 class="main-header">💰 Financial RAG Assistant</h1>', unsafe_allow_html=True)
-    st.markdown("### Advanced RAG with OCR, Embeddings & Local LLM")
+    st.markdown('<h1 class="main-header">BUDDHI-Enterprise Reasoning Engine 🌳</h1>', unsafe_allow_html=True)
+    st.markdown("# Advanced RAG with OCR, Embeddings & Local LLM")
     
     # Initialize pipeline
     if 'rag_pipeline' not in st.session_state:
